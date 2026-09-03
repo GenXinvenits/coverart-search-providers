@@ -16,14 +16,19 @@ import coverart_album_search_legacy as _legacy
 
 # Keep network work bounded. A library scan can otherwise create one worker
 # thread per album and make Rhythmbox compete with dozens of network threads.
-_DISCOGS_EXECUTOR = ThreadPoolExecutor(max_workers=2,
-                                       thread_name_prefix='coverart-discogs')
+_DISCOGS_EXECUTOR = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix='coverart-discogs'
+)
 
 
 def _async_rate_limit(self, callback_func, args, per_second_rate):
     """Rate-limit without ever sleeping in Rhythmbox's main loop."""
     if per_second_rate <= 0:
-        return GLib.idle_add(lambda: (callback_func(*args), False)[1])
+        def invoke_immediate():
+            callback_func(*args)
+            return False
+        return GLib.idle_add(invoke_immediate)
 
     interval = 1.0 / per_second_rate
     now = time.monotonic()
@@ -64,7 +69,13 @@ def _cover_search_next(self, continue_search):
         return False
 
     search = self.searches.popleft()
-    search.search(self.key, self.last_time, self.store, self.search_done, None)
+    search.search(
+        self.key,
+        self.last_time,
+        self.store,
+        self.search_done,
+        None
+    )
     return True
 
 
@@ -75,8 +86,8 @@ _legacy.CoverSearch.next_search = _cover_search_next
 def _discogs_search(self, key, last_time, store, callback, args):
     album = key.get_field('album')
     artists = key.get_field_values('artist')
-    artists = [x for x in artists if x not in (None, '', _legacy._('Unknown'))]
-    if album in ('', _legacy._('Unknown')):
+    artists = [x for x in artists if x not in (None, '', 'Unknown')]
+    if album in ('', 'Unknown'):
         album = None
 
     if album is None or not artists:
@@ -90,7 +101,13 @@ def _discogs_search(self, key, last_time, store, callback, args):
     self.callback_args = args
 
     _DISCOGS_EXECUTOR.submit(
-        self.get_release_cb, store, key, self.searches, args, callback)
+        self.get_release_cb,
+        store,
+        key,
+        self.searches,
+        args,
+        callback
+    )
 
 
 _legacy.DiscogsSearch.search = _discogs_search
