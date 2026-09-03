@@ -80,6 +80,7 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
         self._automatic_scan_model = None
         self._automatic_refresh_idle_id = 0
         self._automatic_refresh_keys = []
+        self._automatic_scan_requested = set()
 
     def do_activate(self):
         """
@@ -140,6 +141,7 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
             self._automatic_refresh_idle_id = 0
 
         self._automatic_refresh_keys = []
+        self._automatic_scan_requested.clear()
         self._automatic_scan_model = None
 
         self.shell.disconnect(self.csi_id)
@@ -151,8 +153,8 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
         self.artist_store.disconnect(self.artist_req_id)
         self.req_id = 0
         self.art_added_id = 0
-        self.art_store = None
         self.artist_store = None
+        self.art_store = None
         self.peas = None
 
         print("CoverArtBrowser DEBUG - end do_deactivate")
@@ -217,7 +219,7 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
         return False
 
     def _automatic_scan_start(self):
-        """Start a safe, read-only pass over the library model."""
+        """Scan once and request artwork only for albums without cached art."""
         self._automatic_scan_idle_id = 0
 
         try:
@@ -228,9 +230,11 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
 
             seen = set()
             count = 0
+            skipped = 0
 
-            # The query model is a GtkTreeModel and is safe to enumerate from
-            # the main loop.  Only request albums that are not already cached.
+            # Each album is considered once per scan, regardless of how many
+            # tracks it contains.  ExtDB is then checked before requesting it.
+            # Albums that already have artwork are never requested again.
             for row in self._automatic_scan_model:
                 entry = row[0]
 
@@ -253,9 +257,6 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
                         continue
                     seen.add(identity)
 
-                    # Let Rhythmbox construct the exact ExtDB key.  This is
-                    # preferable to constructing ExtDBKey objects ourselves,
-                    # which varies between Rhythmbox versions.
                     try:
                         key = entry.get_entry_type().create_ext_db_key(
                             entry, RB.RhythmDBPropType.ALBUM)
@@ -265,19 +266,31 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
                     if key is None:
                         continue
 
-                    if self.art_store.lookup(key):
+                    # Protect against the same album being queued more than
+                    # once during this plugin lifetime as well as duplicate
+                    # rows in the library model.
+                    key_identity = (album, artist)
+                    if key_identity in self._automatic_scan_requested:
+                        skipped += 1
                         continue
 
-                    # Use the normal Rhythmbox ExtDB request path.  This calls
-                    # album_art_requested() and therefore preserves the exact
-                    # existing provider/search behaviour.
+                    # lookup() returns the stored artwork location when real
+                    # artwork exists.  Do not request an album that already
+                    # has artwork in the album-art ExtDB.
+                    art_location = self.art_store.lookup(key)
+                    if art_location:
+                        skipped += 1
+                        continue
+
+                    self._automatic_scan_requested.add(key_identity)
                     self.art_store.request(key, None, None)
                     count += 1
 
                 except Exception as e:
                     print("CoverArtBrowser DEBUG - automatic scan entry error: %s" % e)
 
-            print("CoverArtBrowser DEBUG - automatic album-art scan queued %d albums" % count)
+            print("CoverArtBrowser DEBUG - automatic album-art scan requested %d missing albums, skipped %d" %
+                  (count, skipped))
 
         except Exception as e:
             print("CoverArtBrowser DEBUG - automatic album-art scan failed: %s" % e)
