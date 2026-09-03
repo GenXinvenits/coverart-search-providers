@@ -78,6 +78,8 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
 
         self._automatic_scan_idle_id = 0
         self._automatic_scan_model = None
+        self._automatic_refresh_idle_id = 0
+        self._automatic_refresh_keys = []
 
     def do_activate(self):
         """
@@ -98,6 +100,7 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
 
         self.art_store = RB.ExtDB(name="album-art")
         self.req_id = self.art_store.connect("request", self.album_art_requested)
+        self.art_added_id = self.art_store.connect("added", self.album_art_added)
 
         self.artist_store = CoverArtExtDB(name="artist-art")
         self.artist_req_id = self.artist_store.connect("request", self.artist_art_requested)
@@ -129,6 +132,14 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
                 pass
             self._automatic_scan_idle_id = 0
 
+        if self._automatic_refresh_idle_id:
+            try:
+                GLib.source_remove(self._automatic_refresh_idle_id)
+            except Exception:
+                pass
+            self._automatic_refresh_idle_id = 0
+
+        self._automatic_refresh_keys = []
         self._automatic_scan_model = None
 
         self.shell.disconnect(self.csi_id)
@@ -136,8 +147,10 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
         del self.shell
         del self.db
         self.art_store.disconnect(self.req_id)
+        self.art_store.disconnect(self.art_added_id)
         self.artist_store.disconnect(self.artist_req_id)
         self.req_id = 0
+        self.art_added_id = 0
         self.art_store = None
         self.artist_store = None
         self.peas = None
@@ -156,6 +169,52 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
                 x = AlbumArtPage(shell, song_info)
             except:
                 pass
+
+    def album_art_added(self, store, key, path, pixbuf):
+        """Refresh the CoverArt Browser after automatic artwork is stored.
+
+        The search-provider ExtDB instance can receive the ``added`` signal
+        without the CoverArt Browser's own ExtDB instance receiving it.
+        Queue the key and refresh the corresponding Album object from the
+        CoverArt Browser on the next main-loop iteration.  This avoids touching
+        the GTK model while ExtDB is emitting its signal.
+        """
+        try:
+            self._automatic_refresh_keys.append(key.copy())
+        except Exception:
+            self._automatic_refresh_keys.append(key)
+
+        if not self._automatic_refresh_idle_id:
+            self._automatic_refresh_idle_id = GLib.idle_add(
+                self._automatic_refresh_album_art)
+
+    def _automatic_refresh_album_art(self):
+        """Apply newly downloaded artwork to visible CoverArt albums."""
+        self._automatic_refresh_idle_id = 0
+
+        keys = self._automatic_refresh_keys
+        self._automatic_refresh_keys = []
+
+        try:
+            page = self.shell.props.selected_page
+            manager = getattr(page, 'album_manager', None)
+
+            if manager is None:
+                return False
+
+            for key in keys:
+                try:
+                    album = manager.model.get_from_ext_db_key(key)
+                    if album is not None:
+                        manager.cover_man.load_cover(album)
+                        print("CoverArtBrowser DEBUG - refreshed album art: %s" % album)
+                except Exception as e:
+                    print("CoverArtBrowser DEBUG - automatic album-art refresh error: %s" % e)
+
+        except Exception as e:
+            print("CoverArtBrowser DEBUG - automatic album-art refresh failed: %s" % e)
+
+        return False
 
     def _automatic_scan_start(self):
         """Start a safe, read-only pass over the library model."""
