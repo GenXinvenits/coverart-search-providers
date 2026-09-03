@@ -4,6 +4,10 @@ __version__ = '1.1.1'
 import json
 from collections import defaultdict
 
+# Ensure urllib3 imports Python's standard-library queue module.
+# Rhythmbox's ListenBrainz plugin also has a queue.py, which can
+# otherwise shadow the standard-library module when plugins are loaded.
+import queue
 import requests
 
 import rb3compat

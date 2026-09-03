@@ -47,10 +47,10 @@ IGNORED_SCHEMES = ('http', 'cdda', 'daap', 'mms')
 REPEAT_SEARCH_PERIOD = 86400 * 7
 
 DISC_NUMBER_REGEXS = (
-    "\(disc *[0-9]+\)",
-    "\(cd *[0-9]+\)",
-    "\[disc *[0-9]+\]",
-    "\[cd *[0-9]+\]",
+    r"\(disc *[0-9]+\)",
+    r"\(cd *[0-9]+\)",
+    r"\[disc *[0-9]+\]",
+    r"\[cd *[0-9]+\]",
     " - disc *[0-9]+$",
     " - cd *[0-9]+$",
     " disc *[0-9]+$",

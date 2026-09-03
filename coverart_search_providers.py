@@ -102,31 +102,10 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
         self.artist_req_id = self.artist_store.connect("request", self.artist_art_requested)
 
         self.peas = Peas.Engine.get_default()
-        loaded_plugins = self.peas.get_loaded_plugins()
-
-        self.peas_id = self.peas.connect_after('load-plugin', self.deactivate_plugin)
-
-        if 'artsearch' in loaded_plugins:
-            artsearch_info = self.peas.get_plugin_info('artsearch')
-            self._unload_artsearch(self.peas, artsearch_info)
 
         self.csi_id = self.shell.connect("create_song_info", self.create_song_info)
 
         print("CoverArtBrowser DEBUG - end do_activate")
-
-    def deactivate_plugin(self, engine, info):
-        if info.get_module_name() == 'artsearch':
-            self._unload_artsearch(engine, info)
-
-    def _unload_artsearch(self, engine, info):
-        engine.unload_plugin(info)
-        dialog = Gtk.MessageDialog(None, 0, Gtk.MessageType.WARNING,
-                                   Gtk.ButtonsType.OK,
-                                   _("Conflicting plugin found."))
-        dialog.format_secondary_text(
-            _("The ArtSearch plugin has been deactivated"))
-        dialog.run()
-        dialog.destroy()
 
     def do_deactivate(self):
         """
@@ -141,9 +120,7 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
         del self.db
         self.art_store.disconnect(self.req_id)
         self.artist_store.disconnect(self.artist_req_id)
-        self.peas.disconnect(self.peas_id)
         self.req_id = 0
-        self.peas_id = 0
         self.art_store = None
         self.artist_store = None
         self.peas = None
