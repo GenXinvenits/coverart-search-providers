@@ -17,8 +17,6 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA.
 
-# define plugin
-
 from gi.repository import GObject
 from gi.repository import Gtk
 from gi.repository import GLib
@@ -78,12 +76,8 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
         if not rb3compat.compare_pygobject_version('3.9'):
             GObject.threads_init()
 
-        self._automatic_scan_model = None
-        self._automatic_scan_row_id = 0
-        self._automatic_scan_queue = []
-        self._automatic_scan_seen = set()
-        self._automatic_scan_active = False
         self._automatic_scan_idle_id = 0
+        self._automatic_scan_model = None
 
     def do_activate(self):
         """
@@ -95,7 +89,6 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
         cl = CoverLocale()
         cl.switch_locale(cl.Locale.LOCALE_DOMAIN)
 
-        # define .plugin text strings used for translation
         plugin = _('CoverArt Browser Search Providers')
         desc = _('Additional coverart search providers for Rhythmbox')
 
@@ -110,22 +103,16 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
         self.artist_req_id = self.artist_store.connect("request", self.artist_art_requested)
 
         self.peas = Peas.Engine.get_default()
-
         self.csi_id = self.shell.connect("create_song_info", self.create_song_info)
 
-        # Scan the library automatically.  The library query model is the
-        # source of truth for library entries and is updated as new music is
-        # added, so this handles both existing and newly imported albums.
-        try:
-            self._automatic_scan_model = self.shell.props.library_source.props.base_query_model
-            self._automatic_scan_row_id = self._automatic_scan_model.connect(
-                "row-inserted", self._automatic_scan_row_inserted)
-            self._automatic_scan_idle_id = GLib.idle_add(
-                self._automatic_scan_existing_entries)
-            print("CoverArtBrowser DEBUG - automatic album-art scan enabled")
-        except Exception as e:
-            print("CoverArtBrowser DEBUG - unable to start automatic album-art scan: %s" % e)
+        # Do not scan while Rhythmbox is still constructing the library model.
+        # Starting requests from row-inserted can re-enter the database/model
+        # update path and can crash Rhythmbox.  Instead, wait until the main
+        # loop is idle and perform a single safe pass over the completed model.
+        self._automatic_scan_idle_id = GLib.idle_add(
+            self._automatic_scan_start)
 
+        print("CoverArtBrowser DEBUG - automatic album-art scan scheduled")
         print("CoverArtBrowser DEBUG - end do_activate")
 
     def do_deactivate(self):
@@ -142,17 +129,7 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
                 pass
             self._automatic_scan_idle_id = 0
 
-        if self._automatic_scan_model is not None and self._automatic_scan_row_id:
-            try:
-                self._automatic_scan_model.disconnect(self._automatic_scan_row_id)
-            except Exception:
-                pass
-
         self._automatic_scan_model = None
-        self._automatic_scan_row_id = 0
-        self._automatic_scan_queue = []
-        self._automatic_scan_seen.clear()
-        self._automatic_scan_active = False
 
         self.shell.disconnect(self.csi_id)
         self.csi_id = 0
@@ -169,7 +146,6 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
 
     def create_song_info(self, shell, song_info, is_multiple):
         if is_multiple is False:
-            # following only valid for rhythmbox 3.2
             try:
                 import sys
 
@@ -181,111 +157,72 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
             except:
                 pass
 
-    def _automatic_scan_key(self, entry):
-        """Return the normal Rhythmbox album-art key for a song entry."""
-        album = entry.get_string(RB.RhythmDBPropType.ALBUM)
-        if not album or album == _("Unknown"):
-            return None, None
-
-        artist = entry.get_string(RB.RhythmDBPropType.ALBUM_ARTIST)
-        if not artist or artist == _("Unknown"):
-            artist = entry.get_string(RB.RhythmDBPropType.ARTIST)
-
-        if not artist or artist == _("Unknown"):
-            return None, None
-
-        identity = (album, artist)
-
-        # Use the entry type's ExtDB key builder when available.  Besides
-        # producing the same album/artist storage key, this preserves
-        # informational fields such as location and MusicBrainz IDs needed
-        # by the embedded/local and Cover Art Archive providers.
-        try:
-            key = entry.get_entry_type().create_ext_db_key(
-                entry, RB.RhythmDBPropType.ALBUM)
-            if key is not None:
-                return identity, key
-        except Exception:
-            pass
-
-        # Fallback for entry types without create_ext_db_key.
-        key = RB.ExtDBKey.create_storage("album", album)
-        key.add_field("artist", artist)
-        return identity, key
-
-    def _automatic_scan_queue_entry(self, entry):
-        """Queue an album if it is a song and has no cached album art."""
-        try:
-            song_type = self.db.entry_type_get_by_name("song")
-            if entry.get_entry_type() != song_type:
-                return
-
-            identity, key = self._automatic_scan_key(entry)
-            if identity is None or identity in self._automatic_scan_seen:
-                return
-
-            self._automatic_scan_seen.add(identity)
-
-            try:
-                if self.art_store.lookup(key):
-                    return
-            except Exception:
-                pass
-
-            self._automatic_scan_queue.append(key)
-            self._automatic_scan_process()
-        except Exception as e:
-            print("CoverArtBrowser DEBUG - automatic scan queue error: %s" % e)
-
-    def _automatic_scan_existing_entries(self):
+    def _automatic_scan_start(self):
+        """Start a safe, read-only pass over the library model."""
         self._automatic_scan_idle_id = 0
 
-        if self._automatic_scan_model is None:
-            return False
-
         try:
+            self._automatic_scan_model = self.shell.props.library_source.props.base_query_model
+            if self._automatic_scan_model is None:
+                print("CoverArtBrowser DEBUG - library model unavailable")
+                return False
+
+            seen = set()
+            count = 0
+
+            # The query model is a GtkTreeModel and is safe to enumerate from
+            # the main loop.  Only request albums that are not already cached.
             for row in self._automatic_scan_model:
-                self._automatic_scan_queue_entry(row[0])
+                entry = row[0]
+
+                try:
+                    if entry.get_entry_type() != self.db.entry_type_get_by_name("song"):
+                        continue
+
+                    album = entry.get_string(RB.RhythmDBPropType.ALBUM)
+                    if not album:
+                        continue
+
+                    artist = entry.get_string(RB.RhythmDBPropType.ALBUM_ARTIST)
+                    if not artist:
+                        artist = entry.get_string(RB.RhythmDBPropType.ARTIST)
+                    if not artist:
+                        continue
+
+                    identity = (album, artist)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+
+                    # Let Rhythmbox construct the exact ExtDB key.  This is
+                    # preferable to constructing ExtDBKey objects ourselves,
+                    # which varies between Rhythmbox versions.
+                    try:
+                        key = entry.get_entry_type().create_ext_db_key(
+                            entry, RB.RhythmDBPropType.ALBUM)
+                    except Exception:
+                        key = None
+
+                    if key is None:
+                        continue
+
+                    if self.art_store.lookup(key):
+                        continue
+
+                    # Use the normal Rhythmbox ExtDB request path.  This calls
+                    # album_art_requested() and therefore preserves the exact
+                    # existing provider/search behaviour.
+                    self.art_store.request(key, None, None)
+                    count += 1
+
+                except Exception as e:
+                    print("CoverArtBrowser DEBUG - automatic scan entry error: %s" % e)
+
+            print("CoverArtBrowser DEBUG - automatic album-art scan queued %d albums" % count)
+
         except Exception as e:
-            print("CoverArtBrowser DEBUG - automatic scan iteration error: %s" % e)
+            print("CoverArtBrowser DEBUG - automatic album-art scan failed: %s" % e)
 
-        self._automatic_scan_process()
-        return False
-
-    def _automatic_scan_row_inserted(self, model, path, treeiter):
-        try:
-            entry = model.get_value(treeiter, 0)
-            self._automatic_scan_queue_entry(entry)
-        except Exception as e:
-            print("CoverArtBrowser DEBUG - automatic scan row error: %s" % e)
-
-    def _automatic_scan_process(self):
-        """Request one album at a time to avoid flooding providers."""
-        if self._automatic_scan_active or not self._automatic_scan_queue:
-            return
-
-        key = self._automatic_scan_queue.pop(0)
-        self._automatic_scan_active = True
-
-        try:
-            print("CoverArtBrowser DEBUG - automatically searching for album: %s" %
-                  key.get_field("album"))
-            pending = self.art_store.request(
-                key, self._automatic_scan_finished, None)
-
-            # Cached results call the callback synchronously.  For an
-            # asynchronous request the callback is invoked after the provider
-            # stores the result.
-            if not pending and self._automatic_scan_active:
-                self._automatic_scan_finished(key, None, None, None)
-        except Exception as e:
-            print("CoverArtBrowser DEBUG - automatic scan request error: %s" % e)
-            self._automatic_scan_active = False
-            GLib.idle_add(self._automatic_scan_process)
-
-    def _automatic_scan_finished(self, key, filename, data, user_data):
-        self._automatic_scan_active = False
-        GLib.idle_add(self._automatic_scan_process)
         return False
 
     def album_art_requested(self, store, key, last_time):
@@ -307,8 +244,6 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
                 searches.append(MusicBrainzSearch())
             if provider == SearchPreferences.SPOTIFY_SEARCH:
                 searches.append(SpotifySearch())
-            # if provider == SearchPreferences.DISCOGS_SEARCH:
-            #    searches.append(DiscogsSearch())
             if provider == SearchPreferences.COVERARTARCHIVE_SEARCH:
                 searches.append(CoverartArchiveSearch())
 
@@ -324,10 +259,7 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
         print(last_time)
 
         searches = []
-
         searches.append(LastFMArtistSearch())
-        # searches.append(DiscogsSearch())
-
         s = ArtistCoverSearch(store, key, last_time, searches)
 
         print("finished artist_art_requested")
