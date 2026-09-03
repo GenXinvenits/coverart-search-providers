@@ -111,7 +111,7 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
 
         # Do not scan while Rhythmbox is still constructing the library model.
         # Starting requests from row-inserted can re-enter the database/model
-        # update path and can crash Rhythmbox.  Instead, wait until the main
+        # update path and can crash Rhythmbox. Instead, wait until the main
         # loop is idle and perform a single safe pass over the completed model.
         self._automatic_scan_idle_id = GLib.idle_add(
             self._automatic_scan_start)
@@ -178,7 +178,7 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
         The search-provider ExtDB instance can receive the ``added`` signal
         without the CoverArt Browser's own ExtDB instance receiving it.
         Queue the key and refresh the corresponding Album object from the
-        CoverArt Browser on the next main-loop iteration.  This avoids touching
+        CoverArt Browser on the next main-loop iteration. This avoids touching
         the GTK model while ExtDB is emitting its signal.
         """
         try:
@@ -218,6 +218,27 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
 
         return False
 
+    def _get_coverart_manager(self):
+        """Return CoverArt Browser's album manager when its source is ready.
+
+        CoverArt Browser creates its AlbumManager when its source is first
+        selected. Use Rhythmbox's public entry-type-to-source lookup rather
+        than walking the display-page tree, which is not a stable API.
+        """
+        try:
+            entry_type = self.db.entry_type_get_by_name('CoverArtBrowserEntryType')
+            if entry_type is None:
+                return None
+
+            source = self.shell.get_source_by_entry_type(entry_type)
+            if source is None:
+                return None
+
+            return getattr(source, 'album_manager', None)
+        except Exception as e:
+            print("CoverArtBrowser DEBUG - unable to access browser manager: %s" % e)
+            return None
+
     def _automatic_scan_start(self):
         """Scan once and request artwork only for albums without cached art."""
         self._automatic_scan_idle_id = 0
@@ -228,13 +249,14 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
                 print("CoverArtBrowser DEBUG - library model unavailable")
                 return False
 
+            manager = self._get_coverart_manager()
+
             seen = set()
             count = 0
             skipped = 0
 
             # Each album is considered once per scan, regardless of how many
-            # tracks it contains.  ExtDB is then checked before requesting it.
-            # Albums that already have artwork are never requested again.
+            # tracks it contains. ExtDB is checked before requesting it.
             for row in self._automatic_scan_model:
                 entry = row[0]
 
@@ -266,16 +288,29 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
                     if key is None:
                         continue
 
-                    # Protect against the same album being queued more than
-                    # once during this plugin lifetime as well as duplicate
-                    # rows in the library model.
                     key_identity = (album, artist)
                     if key_identity in self._automatic_scan_requested:
                         skipped += 1
                         continue
 
+                    # If CoverArt Browser is already initialized, trust its
+                    # actual Album object. Its unknown_cover is the placeholder
+                    # used when no artwork is available, so an album whose
+                    # cover differs from that placeholder already has art
+                    # displayed by the browser and must not be searched again.
+                    if manager is not None:
+                        try:
+                            album_obj = manager.model.get(album, artist)
+                            if album_obj is not None and \
+                                    album_obj.cover is not manager.cover_man.unknown_cover:
+                                skipped += 1
+                                continue
+                        except Exception as e:
+                            print("CoverArtBrowser DEBUG - browser cover check failed for %s: %s" %
+                                  (album, e))
+
                     # lookup() returns the stored artwork location when real
-                    # artwork exists.  Do not request an album that already
+                    # artwork exists. Do not request an album that already
                     # has artwork in the album-art ExtDB.
                     art_location = self.art_store.lookup(key)
                     if art_location:
