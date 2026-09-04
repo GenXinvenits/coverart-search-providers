@@ -4,7 +4,7 @@
 # Copyright (C) 2012 - Agustin Carrasco
 #
 # This program is free software; you can redistribute it and/or modify
-# it under the terms of thie GNU General Public License as published by
+# it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 2, or (at your option)
 # any later version.
 #
@@ -33,7 +33,6 @@ from coverart_artist_search import LastFMArtistSearch
 from coverart_album_search import SpotifySearch
 from coverart_artist_search import user_has_account
 from coverart_extdb import CoverArtExtDB
-from rb_oldcache import OldCacheSearch
 from rb_local import LocalSearch
 from rb_lastfm import LastFMSearch
 from rb_musicbrainz import MusicBrainzSearch
@@ -237,8 +236,6 @@ class CoverArtAlbumSearchPlugin(GObject.Object, Peas.Activatable):
                 searches.append(CoverAlbumSearch())
             if provider == SearchPreferences.LOCAL_SEARCH:
                 searches.append(LocalSearch())
-            if provider == SearchPreferences.CACHE_SEARCH:
-                searches.append(OldCacheSearch())
             if provider == SearchPreferences.LASTFM_SEARCH:
                 searches.append(LastFMSearch())
             if provider == SearchPreferences.MUSICBRAINZ_SEARCH:
